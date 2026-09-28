@@ -262,7 +262,7 @@ static void do_pulse(pulse_out_t *out)
 
     if (g_cfg.dbg) {
         printf("# dbg polls=%" PRIu32 " (%.1f kHz)\n", polls,
-               polls / ((esp_timer_get_time() - t0) / 1000000.0));
+               polls * 1000.0 / (esp_timer_get_time() - t0));
     }
 
     if (!tx[0]) {
