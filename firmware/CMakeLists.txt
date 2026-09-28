@@ -1,0 +1,5 @@
+# gonzales — camera-to-display glass-to-glass latency meter
+cmake_minimum_required(VERSION 3.16)
+
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(gonzales)

@@ -1,0 +1,18 @@
+# ESP32-DevKitC (WROOM-32UE): 4 MB flash, DIO 40 MHz
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y
+
+# Timing-critical measurement code: optimize for speed
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Max core clock for the ADC poll loop
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# 1 kHz tick: makes short vTaskDelay() chunks real sleeps (100 Hz rounds
+# pdMS_TO_TICKS(2) to 0 -> fake yield, starves IDLE1)
+CONFIG_FREERTOS_HZ=1000
+
+# Core 1 is dedicated to the timing-critical capture loop by design; its
+# idle task must not trip the watchdog during long capture windows.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n

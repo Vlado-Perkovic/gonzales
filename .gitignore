@@ -1,0 +1,7 @@
+.codegraph
+.omo/
+host/results
+.omo/
+host/__pycache__/
+firmware/build/
+hardware/*.3mf
