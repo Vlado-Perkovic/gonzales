@@ -14,7 +14,7 @@ Device protocol (fw >= 0.2.0), line-based on UART0 @ 115200:
 Usage:
   gonzales.py [-p PORT] version | cal | oneshot | params
   gonzales.py [-p PORT] run -n 100 [--interval 500] [-o OUTDIR]
-              [--cam-fps 30] [--disp-hz 144] [--no-plots]
+              [--cam-fps 30] [--disp-hz 144] [--no-plots] [--no-progress]
   gonzales.py [-p PORT] monitor [--period 100] [--count 0]
   gonzales.py [-p PORT] set <key> <value>
 """
@@ -29,6 +29,8 @@ try:
     import serial
 except ImportError:  # pragma: no cover
     sys.exit("pyserial missing — install with: pip install -r requirements.txt")
+
+from progress import Progress
 
 FW_MIN = (0, 2, 0)
 
@@ -104,9 +106,10 @@ class Gonz:
             return None
         return raw.decode(errors="replace").rstrip("\r\n")
 
-    def cmd(self, cmd_str, until, timeout=10.0):
+    def cmd(self, cmd_str, until, timeout=10.0, on_line=None):
         """Send a command, collect lines until `until(line)` matches.
-        Returns (matched_line, lines)."""
+        Returns (matched_line, lines).  `on_line(l)`, if given, fires for
+        each line received (including the terminating one)."""
         self.ser.reset_input_buffer()
         self.send(cmd_str)
         deadline = time.monotonic() + timeout
@@ -116,6 +119,8 @@ class Gonz:
             if l is None:
                 continue
             lines.append(l)
+            if on_line:
+                on_line(l)
             if until(l):
                 return l, lines
         raise GonzError(f"timeout waiting for reply to {cmd_str!r} "
@@ -153,20 +158,31 @@ class Gonz:
         raise GonzError("oneshot failed: " + l)
 
     def run(self, n, interval=None, progress=False):
+        """Run n pulses; progress=True draws a live bar on stderr
+        (one M or E line per pulse drives it)."""
         if not 1 <= n <= 10000:
             raise GonzError("n must be 1..10000")
         cmd = f"run {n}" + (f" {interval}" if interval else "")
         timeout = n * (interval or 500) / 1000 * 3 + n * 2.5 + 60
         samples, errors = [], []
-        def done(l):
-            return l.startswith("# run done") or l.startswith("# run stopped")
-        _, lines = self.cmd(cmd, done, timeout)
-        for l in lines:
+        bar = Progress(n, enabled=progress)
+
+        def on_line(l):
             if l.startswith("M,"):
                 samples.append(parse_m(l))
             elif l.startswith("E,"):
                 f = l.split(",", 3)
                 errors.append((f[2], f[3] if len(f) > 3 else ""))
+            else:
+                return
+            bar.update(len(samples) + len(errors), len(errors))
+
+        def done(l):
+            return l.startswith("# run done") or l.startswith("# run stopped")
+        try:
+            _, lines = self.cmd(cmd, done, timeout, on_line=on_line)
+        finally:
+            bar.finish()
         summary = next(l for l in lines if l.startswith("# run"))
         return samples, errors, summary
 
@@ -328,6 +344,8 @@ def main():
     p_run.add_argument("--cam-fps", type=float, default=None)
     p_run.add_argument("--disp-hz", type=float, default=None)
     p_run.add_argument("--no-plots", action="store_true")
+    p_run.add_argument("--no-progress", action="store_true",
+                       help="disable the run progress bar on stderr")
 
     p_mon = sub.add_parser("monitor")
     p_mon.add_argument("--period", type=int, default=100)
@@ -362,7 +380,8 @@ def main():
             print(f"# monitor done n={n}", file=sys.stderr)
         elif args.cmd == "run":
             try:
-                samples, errors, summary = g.run(args.n, args.interval)
+                samples, errors, summary = g.run(args.n, args.interval,
+                                                 progress=not args.no_progress)
             except KeyboardInterrupt:
                 print("\n# interrupted - stopping device run")
                 seen, last = g.stop_run()
