@@ -1,215 +1,143 @@
-# gonzales — camera-to-display glass-to-glass latency meter
+# gonzales
 
-Measures the latency of any camera→display chain: a stimulus LED sits in a
-dark box with the camera; the ESP32 timestamps LED-on, then timestamps the
-photoresistor's response when the LED's image appears on the screen. The
-difference, minus sensor lag, is the glass-to-glass latency.
+Glass-to-glass latency meter for camera-to-display chains. An ESP32 drives a
+stimulus LED inside a dark enclosure with the camera under test and
+timestamps a light sensor mounted on the display that shows the camera feed.
+The interval between LED-on and the sensor response is the latency of the
+entire chain. Measurements are reported over UART as CSV lines; a host tool
+collects them and computes statistics.
 
-## Wiring (ESP32-DevKitC, WROOM-32UE)
+Firmware: ESP-IDF v5.5, target `esp32` (ESP32-DevKitC, WROOM-32UE).
+Sensor front-end (CdS LDR divider or BPW34 photodiode) and wiring are
+documented in `hardware/`.
 
-```
-GPIO26 ──[150 Ω]──▶|── GND      stimulus LED (red 5 mm), ~9 mA
-3V3 ──LDR──●──[10 kΩ]── GND     CdS LDR divider
-           └── GPIO34          (ADC1_CH6, input-only; NO filter capacitor)
-```
-
-- The LDR glues face-down on the screen, over the LED's image in the camera
-  feed. Tape the rim so only screen light reaches it.
-- Divider node rises when light hits the LDR (dark ≈ 0 ADC counts).
-- Same three wires accept a future photodiode (BPW34 reverse-biased into
-  47–100 kΩ) or an LM393 module DO (GPIO34 supports interrupts) — no
-  firmware redesign, that's the sub-0.1 ms upgrade path.
-- **GPIO27 mirrors the stimulus LED** (`set mirror -1` disables). Handy for
-  the electrical loopback self-test: jumper GPIO27→GPIO34, then `cal` + a
-  run yields µs-class M lines, proving the full timing path sensor-free.
-
-## Build & flash
+## Build and flash
 
     . ~/.espressif/v5.5.4/esp-idf/export.sh
-    cd firmware && idf.py -p /dev/ttyUSB0 flash
+    cd firmware
+    idf.py set-target esp32        # first build only
+    idf.py -p /dev/ttyUSB0 flash
 
-## Using the shell (minicom or any terminal)
+If flashing fails with serial corruption, drop the baud: `idf.py -b 115200
+-p /dev/ttyUSB0 flash`. Close any terminal program (e.g. minicom) before
+flashing; an open port breaks the flasher handshake.
 
-    minicom -D /dev/ttyUSB0 -b 115200
+## Device shell
 
-    help                     command list
-    version                  V,gonzales,0.2.0,...
-    mon 100 0                stream raw ADC @10 Hz — use to align the LDR
-    cal                      learn dark/bright levels (prints C line)
-    oneshot                  one measurement (prints M line)
-    run 100                  100 measurements + summary
-    stop                     abort run/mon
-    set <key> <value>        interval settle timeout jitter calbright margin
-                             monperiod med dbg th10 th25 th50 th90 led
-    get / reset              show / restore params (persisted in NVS)
+UART0, 115200 8N1, line-based. Identical over any terminal
+(`minicom -D /dev/ttyUSB0 -b 115200`) and the host tool.
 
-### Output lines
+| command | function |
+|---|---|
+| `help` | command list |
+| `version` | firmware/IDF version |
+| `cal` | learn dark/bright levels (chain-aware: waits for the signal to rise, up to `timeout`) |
+| `oneshot` | one measurement |
+| `run [n] [interval_ms]` | n measurements (default 10), prints one M line each plus a summary |
+| `mon [period_ms] [count]` | stream raw ADC readings; `count` 0 = until `stop` |
+| `stop` | abort `run`/`mon`; other input during a run is discarded |
+| `set <key> <value>` | set a parameter (see below), persisted in NVS |
+| `get` | show parameters and calibration |
+| `reset` | restore default parameters |
+
+Output lines:
 
 | line | meaning |
 |---|---|
 | `# ...` | info, command echo |
-| `M,seq,lat10,lat25,lat50,lat90,t0,dark,span,flags` | measurement; `lat*` = µs from LED-on to ADC crossing dark+{10,25,50,90}%·span; `flags`: `ok`, `d?` (dark not settled), `pXX` (crossing XX missing) |
-| `C,dark,bright,span` | calibration (ADC counts) |
+| `M,seq,lat10,lat25,lat50,lat90,t0,dark,span,flags` | measurement; `lat*` in µs from LED-on to the crossing of `dark + {10,25,50,90}%` of span; `t0` absolute µs |
+| `C,dark,bright,span` | calibration, ADC counts |
 | `R,adc` | raw ADC sample (`mon`) |
-| `E,seq,code,msg` | error (`to` = timeout/no crossing, `cal`, `abort`, ...) |
+| `E,seq,code,msg` | error (`to` timeout, `cal`, `abort`, `set`, ...) |
 
-During `run`/`mon` only `stop` is honored; other input is discarded.
+`flags`: `ok`; `d?` = dark level not settled before the pulse (residual
+light, sample excluded by the host tool); `pXX` = XX% crossing missing
+within `timeout`.
 
-## Parameters (`set`/`get`, persisted in NVS)
+## Host tool
 
-Timing parameters are expressed against the *chain's own latency* L (your
-measured median, e.g. ~200 ms for a phone). Get a rough L first with a few
-`oneshot`s at a generous `interval`, then size everything from it.
+Requires [uv](https://docs.astral.sh/uv/). From `host/`:
 
-| key | meaning | how to determine |
+    uv sync
+    uv run gonzales.py run -n 100 --cam-fps 30 --disp-hz 144 -o results/run1
+
+Subcommands: `run`, `oneshot`, `cal`, `monitor`, `params`, `set`, `version`.
+`run` prints a statistics table for raw (`lat50`) and onset-corrected
+latency (min/p5/p25/med/p75/p95/max/mean/std/MAD) and writes
+`samples.csv`, `summary.txt`, `hist.png`, `timeline.png` to the output
+directory. `--cam-fps`/`--disp-hz` mark frame-period combs in the
+histogram. Ctrl-C stops the device-side run and exits. Exit codes: 0 ok,
+1 device error, 2 no usable samples.
+
+Regression check against a live device: `uv run smoke_test.py`
+(11 checks; works without a sensor attached).
+
+## Parameters
+
+Timing parameters are sized against the chain's measured median latency L
+(get a rough L from a few `oneshot`s at a generous `interval`, e.g. 1000 ms).
+Defaults below were tuned on an ~80 ms phone chain.
+
+| key | default | sizing |
 |---|---|---|
-| `interval` | minimum spacing between pulse starts. Actual spacing = max(`interval`, natural cycle) + random jitter. | ≈ 3–5× L. Must exceed capture (~1× L) + off-edge recovery (~1× L) so the floor actually paces the run. |
-| `settle` | max wait for the dark level before each pulse. It is a *cap*, not a delay — exits as soon as the sensor reads dark, so oversizing is nearly free. | ≥ the chain's **off-edge** latency (blob disappearing ≈ L). Rule: 2–3× L. Too small → `d?` flags → samples get excluded from stats. |
-| `timeout` | max capture window after LED-on. | ≥ p95 latency, i.e. 3–5× L. Too small → `E,to`; too large → slow runs when crossings fail. |
-| `on` | fixed LED on-time in ms. `0` = automatic (LED off at the `th90` crossing or `timeout`). With `on > 0` the LED flashes for exactly that long while the capture keeps polling — timestamps stay relative to LED-on, so a short flash measures normally and agitates auto-exposure less. | `0` normally; 50–200 ms for a camera-flash-style stimulus. Must be well below `timeout`. |
-| `jitter` | ±random variation added to each pulse's spacing. Destroys phase-lock between pulse timing and camera/display frame clocks (anti-aliasing). | 100–150 ms ≫ any frame period; applied even when the chain's round-trip overruns `interval` (fw ≥ 0.2.3). |
-| `calbright` | stabilization wait in `cal` *after* the rise is detected. | 200–500 ms. (fw ≥ 0.2.4: waiting for the blob to arrive through the chain is automatic — `cal` polls until the signal rises, up to `timeout`.) |
-| `margin` | dark-settle tolerance in ADC counts. | 40 default. Raise only if `d?` flags persist with verified-dark optics (noisy dark level). |
-| `th10 th25 th50 th90` | crossing thresholds as fractions of span (×10000). `lat50` is the primary statistic; `th10` anchors the onset correction. | Defaults 1000/2500/5000/7000 — keep the 10/25/50 geometry intact, the onset-correction constant is derived for 10%/50%. Lower `th90` further only if the source ramps (AE hunting); `lat50` is unaffected. |
-| `med` | median-of-3 ADC reads per poll (noise rejection). | keep 1. |
-| `monperiod` | `mon` stream period. | setup tool only. |
-| `led` / `mirror` | stimulus GPIO / its loopback mirror (-1 disables). | fixed unless rewiring. |
-| `dark` / `span` | learned calibration (read-only via `get`). | refreshed by `cal` whenever the physical setup changes. |
+| `interval` | 220 | min pulse spacing; ≈ 2.5–3× L. Below the chain's natural cycle (~2.3× L) the cycle itself paces the run and higher values change nothing |
+| `settle` | 200 | max wait for dark before each pulse (exits early); ≥ the chain's off-edge ≈ L |
+| `timeout` | 500 | max capture window; ≥ p95 latency (3–5× L) |
+| `on` | 0 | fixed LED on-time in ms; 0 = LED off at the `th90` crossing |
+| `jitter` | 50 | ±random spacing added per pulse; anti-aliasing against frame clocks; keep ≥ a few frame periods |
+| `calbright` | 300 | stabilization after the cal rise is detected |
+| `margin` | 10 | dark-settle tolerance, ADC counts |
+| `th10 th25 th50 th90` | 1000/2500/5000/7000 | crossing fractions ×10000; keep the 10/25/50 geometry — the onset correction is derived for it |
+| `med` | 1 | median-of-3 ADC reads |
+| `led` / `mirror` | 26 / 27 | stimulus GPIO / loopback mirror (-1 disables) |
 
-Symptom → fix:
+Symptoms: `d?` flags → raise `settle` or `interval`; `E,to` → weak signal
+or `timeout` too small; `p90` on most samples → source brightness ramps
+(lock camera AE) or lower `th90`; spacing stuck at `timeout`+off-edge →
+`th90` unreachable.
 
-| symptom | fix |
-|---|---|
-| `d?` flags / "excluded N unsettled-dark" | raise `settle` (residual light from previous pulse) |
-| `E,to no_crossing` | signal absent/weak, or `timeout` too small |
-| `p90` on every sample | source brightness ramps below 90% of settled span → lock camera AE, or lower `th90` |
-| spacing stuck at `timeout` + off-edge | captures run to full timeout (`th90` unreachable) → same fix as above |
-| raw ≫ onset divergence | something is ramping: slow sensor, or unlocked AE |
+## Methodology
 
-## Host tool (statistics)
+- Lock camera exposure, focus, and white balance. Auto-exposure in a dark
+  enclosure modulates the stimulus brightness every pulse, widens the
+  distribution, and invalidates the onset correction.
+- Run `cal` after any physical change to the setup. Span below 100 counts
+  fails with `E,cal`.
+- Pulse spacing is randomized (±`jitter`, including when the chain's
+  round-trip overruns `interval`), so latency samples cannot phase-lock to
+  frame clocks; the histogram shows the true distribution.
+- Instrument floor: point the sensor at the LED directly (no camera/screen)
+  and `run` — the result is the device's own sensor lag. With a photodiode
+  expect ~10–30 µs raw; with a CdS LDR ~1 ms raw, cancelled by the onset
+  correction.
+- Electrical self-test: jumper `mirror` (GPIO27) to GPIO34, `cal`, `run` —
+  µs-class M lines prove the timing path with no sensor.
+- Samples far below the chain's physical floor (< 30 ms on typical chains)
+  indicate residual light or a setup fault, not latency.
 
-    cd host && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-    .venv/bin/python gonzales.py run -n 100 --interval 500 \
-        --cam-fps 30 --disp-hz 144 -o results/test1
+## lat50 vs onset
 
-Prints raw (lat50) and onset-corrected statistics (min/p5/p25/med/p75/p95/
-max/mean/stddev), writes `samples.csv`, `summary.txt`, `hist.png`,
-`timeline.png`. The onset correction `t10 − 0.179·(t50 − t10)` extrapolates
-the LDR's exponential rise back to true onset, cancelling most sensor lag;
-with a fast photodiode raw and corrected converge (built-in sanity check).
+`lat50` is the time from LED-on to the sensor crossing 50% of the span; it
+overstates the true latency by the sensor's response lag. `onset` removes
+that lag using the measurement itself. Model the sensor as first-order
+exponential after an instantaneous light step at `t_on`:
 
-Other subcommands: `version`, `cal`, `oneshot`, `monitor`, `params`,
-`set key value`. Smoke test: `.venv/bin/python smoke_test.py` (11 checks,
-works without the LDR connected).
+    s(t)  = dark + span · (1 − e^(−(t−t_on)/τ))
+    t_f   = t_on − τ · ln(1 − f)
+    τ     = (t50 − t10) / 0.58779
+    t_on  = t10 − 0.17919 · (t50 − t10)
 
-## lat50 vs onset — the sensor-lag cancellation math
+    lat50 = t50 − t0                (biased high by 0.69·τ)
+    onset = t_on − t0               (unbiased for exponential sensors)
 
-**lat50 (raw)** is the time from LED-on (`t0`) to the sensor signal crossing
-50% of the calibrated span. **onset** is an extrapolated estimate of the time
-the light actually *arrived* at the sensor. lat50 always overshoots the true
-latency by the sensor's lag; onset removes that lag using only the
-measurement itself — no sensor characterization required.
+The correction assumes only the sensor smears an instantaneous step. A
+ramping source (unlocked AE) is indistinguishable from sensor lag and
+drives onset low, possibly negative — negative onsets indicate a ramping
+source. With a fast photodiode τ is tens of µs and raw ≈ onset; divergence
+between the two means something is ramping.
 
-Model: when the display pixel lights up at time `t_on`, a first-order sensor
-(CdS cell, RC-coupled photodiode — anything exponential) responds as
+## Repository layout
 
-    s(t) = dark + span · (1 − e^(−(t − t_on)/τ))
-
-A threshold at fraction f of span is crossed at
-
-    t_f = t_on − τ · ln(1 − f)
-
-so for the 10% and 50% crossings:
-
-    t10 = t_on + 0.10536·τ          (ln(1/0.9))
-    t50 = t_on + 0.69315·τ          (ln(1/0.5))
-
-Subtracting eliminates `t_on` and yields τ from the measurement itself:
-
-    τ = (t50 − t10) / 0.58779
-
-Substituting back eliminates τ and recovers the true arrival time:
-
-    t_on = t10 − 0.17919 · (t50 − t10)
-
-The host tool computes both:
-
-    lat50  = t50 − t0                     (biased high by 0.69·τ)
-    onset  = t_on − t0                    (unbiased for exponential sensors)
-
-Worked example — the LDR floor test (LDR staring at the LED directly, where
-the true latency is ~0): measured `lat10 = 137 µs`, `lat50 = 950 µs`:
-
-    τ     = (950 − 137) / 0.5878 = 1382 µs
-    onset = 137 − 0.179 · (950 − 137) = −9 µs ≈ 0   ✓
-
-The 950 µs of apparent latency was *entirely* sensor lag, and the correction
-annihilated it without ever being told the LDR's time constant.
-
-Validity conditions — the math assumes exactly one thing: the light step at
-the display is **instantaneous** and only the sensor smears it. Therefore:
-
-- **Lock camera exposure/AE.** If the *source* brightness ramps (AE
-  re-adjusting to each pulse), the ramp is indistinguishable from sensor lag;
-  the correction subtracts it too and onset *underestimates* — it can even
-  go negative (observed in the AE-hunting runs). Negative onsets are the
-  tell-tale of a ramping source, not a math bug.
-- **Sanity check built in:** with the fast photodiode (τ ≈ 30 µs),
-  `t50 − t10` is a few tens of µs, so raw ≈ onset. If the two diverge
-  significantly, something is ramping — sensor, source, or display
-  brightness curve.
-
-## Methodology notes
-
-- **Lock the camera**: manual exposure (≤5 ms), fixed focus, fixed WB. In a
-  dark box auto-exposure will ruin the measurement — and it invalidates the
-  onset correction (see the math section: a ramping source masquerades as
-  sensor lag).
-- **Randomized pulse spacing** (default jitter ±100 ms) prevents phase-locking
-  to the display/camera refresh — the histogram then shows the true
-  distribution, including frame-quantization combs (annotate them with
-  `--cam-fps`/`--disp-hz`).
-- **Measure on the bright edge only**; the LDR's light→dark recovery is the
-  slow edge (settle wait between pulses, ~2 samples/s).
-- **Instrument floor test**: point the sensor at the stimulus LED directly
-  (no camera/screen), `run 50` → that number is the device's own sensor lag,
-  the offset to keep in mind (mostly cancelled by the onset correction).
-- **Electrical loopback self-test**: jumper GPIO26→GPIO34 — cal then run
-  yields µs-class M lines, proving the full timing path without any sensor.
-
-## Photodiode upgrade (BPW34)
-
-Same three wires, no firmware change — thresholds are calibrated fractions,
-sensor-agnostic. Desolder LDR + 10 kΩ, solder in:
-
-```
-3V3 ──[BPW34 cathode→anode]──●──[47 kΩ]── GND
-                              └── GPIO34    light → node rises (same polarity)
-```
-
-- Cathode is the pin at the notched/tabbed corner of the case — cathode
-  to 3V3 (reverse-biased as drawn).
-- 47 kΩ: ~3 µs response, ADC-friendly source impedance. 100 kΩ if the
-  calibrated span is weak (2× signal, ~6 µs). Still NO capacitor on the node.
-- BPW34 active area (~7 mm²) is ~3× smaller than the LDR face — center it
-  on the blob's bright core during `mon` alignment.
-
-After the swap, re-tune (LDR-era values were compensating for a slow cell)
-and recalibrate:
-
-    set settle 100      # PD dark recovery is µs, not ~400 ms
-    set calbright 300   # only the chain's own latency remains
-    set interval 300    # ~3 samples/s
-    set timeout 1500
-    cal
-
-Redo the floor test: expect ~10-20 µs raw with raw ≈ corrected — that
-convergence is the built-in proof the sensor no longer adds lag. Caveat: a
-fast PD can see low-frequency backlight PWM (175-250 Hz panels) as crossing
-jitter; a bimodal histogram or a ~4-6 ms comb is the signature.
-
-## Repo layout
-
-    firmware/   ESP-IDF v5.5 project (esp32 target, 4 MB flash)
-      main/       cfg.c params+NVS · console.c shell · measure.c engine
-    host/       gonzales.py CLI · smoke_test.py · requirements.txt
+    firmware/   ESP-IDF project: cfg.c params/NVS, console.c shell, measure.c engine
+    host/       gonzales.py CLI, smoke_test.py, pyproject.toml (uv)
+    hardware/   schematic and wiring documentation
