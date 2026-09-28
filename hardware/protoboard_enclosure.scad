@@ -41,14 +41,14 @@ pin_lead   = 0.8;        // lead-in cone height on the pin tip
 /* bottom opening */
 bh_w           = 15;     // size in x
 bh_l           = 10;     // size in y
-bh_cx          = 7;      // x centre offset (0 = centred across the width)
-bh_y_from_back = 8.2;    // hole CENTRE distance from the OUTER back edge
+bh_cx          = -7;      // x centre offset (0 = centred across the width)
+bh_y_from_back = 13.2;    // hole CENTRE distance from the OUTER back edge
                          // (back = the pcb_w side opposite the front opening)
 
 /* front opening (in the pcb_w / 5 cm side) */
-fh_w  = 15;              // opening width
+fh_w  = 20;              // opening width
 fh_h  = 20;               // opening height
-fh_x  = 8;               // opening left edge from OUTER left box edge
+fh_x  =10;               // opening left edge from OUTER left box edge
 fh_cz = 15;              // centre height of the opening
 
 /* ---------------- 4. Lid & snap fit ---------------- */
@@ -65,7 +65,7 @@ bead_bot_v = 0.15;       // retention chamfer, vertical
 rib_p      = 0.3;        // box snap rib protrusion
 rib_h      = 1.6;        // box snap rib height
 entry_ch   = 1.2;        // lead-in chamfer at the box mouth
-pry_notch   = true;      // finger notches in the rim for prying the lid off
+pry_notch   = false;      // finger notches in the rim for prying the lid off
 pry_notch_d = 5;         // notch diameter
 foot_d      = 5;       // clamping foot diameter (added to press PCB down)
 foot_hole_d   = 2;     // diameter of the hole in the clamping foot
@@ -188,7 +188,7 @@ module lid() {
         
         // Explicitly list the feet, omitting the one next to the front hole
         foot_positions = [
-            // [sxy, sxy],               // Front-Left (REMOVED - next to front hole)
+            [sxy, sxy],               // Front-Left (REMOVED - next to front hole)
             [out_w - sxy, sxy],          // Front-Right
             [sxy, out_l - sxy],          // Back-Left
             [out_w - sxy, out_l - sxy]   // Back-Right
