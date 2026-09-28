@@ -14,7 +14,7 @@
 #include "cfg.h"
 #include "measure.h"
 
-#define GONZ_FW_VERSION "0.2.6"
+#define GONZ_FW_VERSION "0.3.1"
 
 #define RX_BUF_SZ 2048
 #define TX_BUF_SZ 2048
@@ -64,7 +64,7 @@ static void cmd_help(void)
     printf("#   run [n] [interval_ms]    n measurements (default 10), M each + summary\n");
     printf("#   mon [period_ms] [count]  stream R lines; count 0 = until stop\n");
     printf("#   stop                     abort run/mon\n");
-    printf("#   set <key> <value>        set param (keys: see get; on = LED on-time ms, 0=auto)\n");
+    printf("#   set <key> <value>        set param (keys: see get; adc oneshot|continuous)\n");
     printf("#   get                      list params + calibration\n");
     printf("#   reset                    restore default params\n");
     printf("# lines: '# ' info | M,... meas | C,... cal | R,... raw | E,... error\n");
@@ -107,6 +107,8 @@ static void dispatch(char *line)
         if (cfg_set_key(&g_cfg, argv[1], argv[2], err, sizeof err)) {
             if (strcasecmp(argv[1], "led") == 0 || strcasecmp(argv[1], "mirror") == 0)
                 measure_led_apply();
+            if (strcasecmp(argv[1], "adc") == 0 || strcasecmp(argv[1], "adcrate") == 0)
+                measure_adc_apply(true);
             printf("# set %s=%s\n", argv[1], argv[2]);
         } else {
             printf("E,0,set,%s\n", err);

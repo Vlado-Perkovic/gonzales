@@ -24,6 +24,8 @@ static const gonz_cfg_t c_defaults = {
     .mon_period_ms= 100,
     .med          = 1,
     .dbg          = 0,
+    .adc_mode     = 0,
+    .adcrate      = 500000,
     .th10 = 1000, .th25 = 2500, .th50 = 5000, .th90 = 7000,
     .led_gpio     = 26,
     .mirror_gpio  = 27,
@@ -44,6 +46,14 @@ static esp_err_t rd_u32(nvs_handle_t h, const char *k, uint32_t *v)
     return e;
 }
 
+/* narrow-field read: casting &uint8_field to u32* would spill 3 bytes of
+ * zeros into the next struct member (this bug corrupted th10/adcrate) */
+static void rd_u8(nvs_handle_t h, const char *k, uint8_t *v)
+{
+    uint32_t t;
+    if (nvs_get_u32(h, k, &t) == ESP_OK) *v = (uint8_t)t;
+}
+
 esp_err_t cfg_load(gonz_cfg_t *c)
 {
     cfg_defaults(c);
@@ -59,8 +69,10 @@ esp_err_t cfg_load(gonz_cfg_t *c)
     rd_u32(h, "calbright", &c->calbright_ms);
     rd_u32(h, "margin",    &c->margin);
     rd_u32(h, "monperiod", &c->mon_period_ms);
-    rd_u32(h, "med",       (uint32_t *)&c->med);
-    rd_u32(h, "dbg",       (uint32_t *)&c->dbg);
+    rd_u8(h, "med",       &c->med);
+    rd_u8(h, "dbg",       &c->dbg);
+    rd_u8(h, "adcmode",   &c->adc_mode);
+    rd_u32(h, "adcrate",   &c->adcrate);
     rd_u32(h, "th10",      &c->th10);
     rd_u32(h, "th25",      &c->th25);
     rd_u32(h, "th50",      &c->th50);
@@ -88,6 +100,8 @@ esp_err_t cfg_save(const gonz_cfg_t *c)
     nvs_set_u32(h, "monperiod", c->mon_period_ms);
     nvs_set_u32(h, "med",       c->med);
     nvs_set_u32(h, "dbg",       c->dbg);
+    nvs_set_u32(h, "adcmode",   c->adc_mode);
+    nvs_set_u32(h, "adcrate",   c->adcrate);
     nvs_set_u32(h, "th10",      c->th10);
     nvs_set_u32(h, "th25",      c->th25);
     nvs_set_u32(h, "th50",      c->th50);
@@ -107,6 +121,19 @@ static bool parse_set(gonz_cfg_t *c, const char *key, const char *val,
                       char *err, size_t errlen)
 {
     static const char *ledwarn = "led gpio %ld outside 0..33";
+
+    if (strcasecmp(key, "adc") == 0) {
+        if (strcasecmp(val, "oneshot") == 0 || strcmp(val, "0") == 0) {
+            c->adc_mode = 0;
+        } else if (strcasecmp(val, "continuous") == 0 || strcmp(val, "1") == 0) {
+            c->adc_mode = 1;
+        } else {
+            snprintf(err, errlen, "adc: oneshot|continuous");
+            return false;
+        }
+        return true;
+    }
+
     char *end = NULL;
     long v = strtol(val, &end, 0);
     if (end == val || *end != '\0') {
@@ -124,6 +151,7 @@ static bool parse_set(gonz_cfg_t *c, const char *key, const char *val,
         {"monperiod", &c->mon_period_ms,10, 60000},
         {"med",       (uint32_t *)&c->med, 0, 1},
         {"dbg",       (uint32_t *)&c->dbg, 0, 1},
+        {"adcrate",   &c->adcrate,     10000, 2000000},
         {"th10",      &c->th10,          1,  9999},
         {"th25",      &c->th25,          1,  9999},
         {"th50",      &c->th50,          1,  9999},
@@ -175,9 +203,11 @@ void cfg_print(const gonz_cfg_t *c)
            " margin=%" PRIu32 " monperiod=%" PRIu32 "\n",
            c->interval_ms, c->settle_ms, c->timeout_ms, c->on_ms,
            c->jitter_ms, c->calbright_ms, c->margin, c->mon_period_ms);
-    printf("# med=%" PRIu8 " dbg=%" PRIu8 " th10=%" PRIu32 " th25=%" PRIu32
+    printf("# med=%" PRIu8 " dbg=%" PRIu8 " adc=%s adcrate=%" PRIu32
+           " th10=%" PRIu32 " th25=%" PRIu32
            " th50=%" PRIu32 " th90=%" PRIu32 " led=%" PRId32 " mirror=%" PRId32 "\n",
-           c->med, c->dbg, c->th10, c->th25, c->th50, c->th90, c->led_gpio,
+           c->med, c->dbg, c->adc_mode ? "continuous" : "oneshot", c->adcrate,
+           c->th10, c->th25, c->th50, c->th90, c->led_gpio,
            c->mirror_gpio);
     printf("# dark=%" PRIu32 " span=%" PRIu32 "\n", c->dark, c->span);
 }

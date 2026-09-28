@@ -14,6 +14,7 @@
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_continuous.h"
 #include "cfg.h"
 #include "console.h"
 
@@ -21,8 +22,12 @@
 #define CAL_MIN_SPAN  100               /* counts; below = no usable signal */
 #define BURST_N       15
 #define MAX_RUN_N     10000
+#define FRAME_BYTES   256               /* DMA frame buffer, 128 samples    */
 
-static adc_oneshot_unit_handle_t s_adc;
+static adc_oneshot_unit_handle_t s_adc;        /* oneshot backend  */
+static adc_continuous_handle_t s_adc_c;        /* continuous backend */
+static int s_last_val;                         /* latest continuous sample */
+static uint8_t s_buf[FRAME_BYTES];             /* DMA frame read buffer    */
 static uint32_t s_seq;
 
 /* ---- low level -------------------------------------------------------- */
@@ -44,6 +49,11 @@ static inline void led_off(void)
     if (mirror_active()) gpio_set_level(g_cfg.mirror_gpio, 0);
 }
 
+static inline int decode_sample(const uint8_t *p)
+{
+    return ((uint16_t)p[0] | ((uint16_t)p[1] << 8)) & 0x0FFF;
+}
+
 static int read_once(void)
 {
     int v = -1;
@@ -51,8 +61,25 @@ static int read_once(void)
     return v;
 }
 
+static void drain_cont(void)
+{
+    uint32_t got = 0;
+    while (adc_continuous_read(s_adc_c, s_buf, sizeof s_buf, &got, 0) == ESP_OK
+           && got >= SOC_ADC_DIGI_RESULT_BYTES) {
+        s_last_val = decode_sample(&s_buf[got - SOC_ADC_DIGI_RESULT_BYTES]);
+    }
+}
+
+static int read_latest(void)
+{
+    if (!s_adc_c) return read_once();
+    drain_cont();
+    return s_last_val;
+}
+
 static int read_raw(void)
 {
+    if (s_adc_c) return read_latest();
     if (!g_cfg.med) return read_once();
     int a = read_once(), b = read_once(), c = read_once();
     if (a < 0 || b < 0 || c < 0) return -1;
@@ -70,7 +97,7 @@ static uint32_t burst_median(int n, int gap_ms)
     uint32_t v[BURST_N];
     if (n > BURST_N) n = BURST_N;
     for (int i = 0; i < n; i++) {
-        int r = read_once();
+        int r = read_raw();          /* mode-aware: oneshot or DMA latest */
         v[i] = (r < 0) ? 0 : (uint32_t)r;
         vTaskDelay(pdMS_TO_TICKS(gap_ms));
     }
@@ -78,18 +105,81 @@ static uint32_t burst_median(int n, int gap_ms)
     return v[n / 2];
 }
 
-void measure_init(void)
+static bool cont_reconfig(void)
 {
+    if (adc_continuous_stop(s_adc_c) != ESP_OK) return false;
+    adc_digi_pattern_config_t pat = {
+        .atten = ADC_ATTEN_DB_12, .channel = ADC_CHANNEL,
+        .unit = ADC_UNIT_1, .bit_width = ADC_BITWIDTH_12,
+    };
+    adc_continuous_config_t cc = {
+        .conv_mode = ADC_CONV_SINGLE_UNIT_1,
+        .format = ADC_DIGI_OUTPUT_FORMAT_TYPE1,
+        .sample_freq_hz = g_cfg.adcrate,
+        .pattern_num = 1,
+        .adc_pattern = &pat,
+    };
+    if (adc_continuous_config(s_adc_c, &cc) != ESP_OK) return false;
+    return adc_continuous_start(s_adc_c) == ESP_OK;
+}
+
+void measure_adc_apply(bool announce)
+{
+    /* same-mode re-apply: light reconfig, never deinit a live DMA driver
+     * (teardown-while-running trips xTaskPriorityDisinherit) */
+    if (g_cfg.adc_mode && s_adc_c) {
+        if (cont_reconfig()) {
+            if (announce)
+                printf("# adc: continuous @ %" PRIu32 " Hz\n", g_cfg.adcrate);
+            return;
+        }
+        /* fall through to full rebuild on failure */
+    }
+    if (!g_cfg.adc_mode && !s_adc_c && s_adc) return;
+
+    if (s_adc_c) {
+        adc_continuous_stop(s_adc_c);
+        adc_continuous_deinit(s_adc_c);
+        s_adc_c = NULL;
+    }
+    if (s_adc) {
+        adc_oneshot_del_unit(s_adc);
+        s_adc = NULL;
+    }
+
+    if (g_cfg.adc_mode) {
+        adc_continuous_handle_cfg_t hc = {
+            .max_store_buf_size = 8192,
+            .conv_frame_size = FRAME_BYTES,
+        };
+        if (adc_continuous_new_handle(&hc, &s_adc_c) == ESP_OK &&
+            cont_reconfig()) {
+            if (announce)
+                printf("# adc: continuous @ %" PRIu32 " Hz\n", g_cfg.adcrate);
+            return;
+        }
+        if (s_adc_c) {
+            adc_continuous_deinit(s_adc_c);
+            s_adc_c = NULL;
+        }
+        printf("# adc: continuous init failed, falling back to oneshot\n");
+    }
+
     adc_oneshot_unit_init_cfg_t ucfg = {
         .unit_id = ADC_UNIT_1,
         .ulp_mode = ADC_ULP_MODE_DISABLE,
     };
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&ucfg, &s_adc));
+    if (adc_oneshot_new_unit(&ucfg, &s_adc) != ESP_OK) return;
     adc_oneshot_chan_cfg_t ccfg = {
         .bitwidth = ADC_BITWIDTH_12,
         .atten = ADC_ATTEN_DB_12,
     };
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc, ADC_CHANNEL, &ccfg));
+    adc_oneshot_config_channel(s_adc, ADC_CHANNEL, &ccfg);
+}
+
+void measure_init(void)
+{
+    measure_adc_apply(false);
     measure_led_apply();
 }
 
@@ -236,21 +326,56 @@ static void do_pulse(pulse_out_t *out)
 
     led_on();
     bool led_is_on = true;
-    while (esp_timer_get_time() < deadline) {
-        int64_t now = esp_timer_get_time();
-        int v = read_raw();
-        if (v >= 0) {
-            if (!tx[0] && v >= (int)thr[0]) tx[0] = now;
-            if (!tx[1] && v >= (int)thr[1]) tx[1] = now;
-            if (!tx[2] && v >= (int)thr[2]) tx[2] = now;
-            if (!tx[3] && v >= (int)thr[3]) tx[3] = now;
+    if (s_adc_c) {
+        /* continuous DMA: per-sample timestamps reconstructed from the
+         * hardware pace: t(i) = t_frame_return - (n-1-i)/adcrate.
+         * Drain the backlog first so t_ret cannot lag the samples, and
+         * ignore samples predating t0 (pre-LED tail of a frame). */
+        uint32_t frames = 0;
+        drain_cont();
+        while (esp_timer_get_time() < deadline) {
+            uint32_t got = 0;
+            if (adc_continuous_read(s_adc_c, s_buf, sizeof s_buf, &got, 0)
+                    == ESP_OK && got) {
+                int64_t t_ret = esp_timer_get_time();
+                int ns = got / SOC_ADC_DIGI_RESULT_BYTES;
+                for (int i = 0; i < ns; i++) {
+                    int v = decode_sample(&s_buf[i * SOC_ADC_DIGI_RESULT_BYTES]);
+                    int64_t t_s = t_ret - (int64_t)(ns - 1 - i) * 1000000LL
+                                  / (int64_t)g_cfg.adcrate;
+                    if (t_s < t0) continue;
+                    if (!tx[0] && v >= (int)thr[0]) tx[0] = t_s;
+                    if (!tx[1] && v >= (int)thr[1]) tx[1] = t_s;
+                    if (!tx[2] && v >= (int)thr[2]) tx[2] = t_s;
+                    if (!tx[3] && v >= (int)thr[3]) tx[3] = t_s;
+                    if (tx[3]) break;
+                }
+                polls += ns;
+            }
+            if (led_is_on && esp_timer_get_time() >= on_deadline) {
+                led_off();
+                led_is_on = false;
+            }
+            if (tx[3]) break;
+            if ((++frames & 0x7) == 0 && console_poll_stop()) break;
         }
-        if (led_is_on && now >= on_deadline) {
-            led_off();          /* fixed flash over; keep polling crossings */
-            led_is_on = false;
+    } else {
+        while (esp_timer_get_time() < deadline) {
+            int64_t now = esp_timer_get_time();
+            int v = read_raw();
+            if (v >= 0) {
+                if (!tx[0] && v >= (int)thr[0]) tx[0] = now;
+                if (!tx[1] && v >= (int)thr[1]) tx[1] = now;
+                if (!tx[2] && v >= (int)thr[2]) tx[2] = now;
+                if (!tx[3] && v >= (int)thr[3]) tx[3] = now;
+            }
+            if (led_is_on && now >= on_deadline) {
+                led_off();          /* fixed flash over; keep polling crossings */
+                led_is_on = false;
+            }
+            if (tx[3]) break;
+            if ((++polls & 0xFF) == 0 && console_poll_stop()) break;
         }
-        if (tx[3]) break;
-        if ((++polls & 0xFF) == 0 && console_poll_stop()) break;
     }
     if (led_is_on) led_off();
 

@@ -16,6 +16,8 @@ typedef struct {
     uint32_t mon_period_ms;  /* mon stream period                           */
     uint8_t  med;            /* 1 = median-of-3 ADC reads                   */
     uint8_t  dbg;            /* 1 = debug prints (poll rate etc.)           */
+    uint8_t  adc_mode;       /* 0 = oneshot poll, 1 = continuous DMA        */
+    uint32_t adcrate;        /* continuous sample rate, Hz                  */
     uint32_t th10;           /* threshold fractions, x10000                 */
     uint32_t th25;
     uint32_t th50;
