@@ -324,6 +324,51 @@ def plots(outdir, samples, cam_fps=None, disp_hz=None):
 
 # -- CLI ----------------------------------------------------------------------
 
+def load_samples(path):
+    """Rebuild sample dicts from a samples.csv written by run."""
+    out = []
+    with open(path) as fh:
+        for row in csv.DictReader(fh):
+            out.append({
+                "seq": int(row["seq"]),
+                "lat10": int(row["lat10_us"]), "lat25": int(row["lat25_us"]),
+                "lat50": int(row["lat50_us"]), "lat90": int(row["lat90_us"]),
+                "t0": int(row["t0_us"]), "dark": int(row["dark"]),
+                "span": int(row["span"]), "flags": row["flags"],
+            })
+    return out
+
+
+def analyze_dir(dirpath, cam_fps=None, disp_hz=None, no_plots=False):
+    """Post-hoc analysis of a saved results dir: stats table, summary.txt
+    and annotated plots regenerated from samples.csv."""
+    samples = load_samples(os.path.join(dirpath, "samples.csv"))
+    use = [m for m in samples if usable(m)]
+    excluded = len(samples) - len(use)
+    if excluded:
+        print(f"# excluded {excluded} unsettled-dark (d?) samples")
+    if not use:
+        print("# no usable samples")
+        return 2
+    raw = np.array([m["lat50"] for m in use]) / 1000.0
+    cor = np.array([onset_us(m) for m in use]) / 1000.0
+
+    print_table([("lat50 ms", stats(raw)), ("onset ms", stats(cor))])
+    with open(os.path.join(dirpath, "summary.txt"), "w") as fh:
+        fh.write(f"# re-analyzed {dirpath}"
+                 + (f" cam_fps={cam_fps}" if cam_fps else "")
+                 + (f" disp_hz={disp_hz}" if disp_hz else "") + "\n")
+        fh.write(f"n_total={len(samples)} usable={len(use)}\n")
+        for name, st in [("lat50_ms", stats(raw)), ("onset_ms", stats(cor))]:
+            if st:
+                fh.write(name + ": " +
+                         " ".join(f"{k}={st[k]:.3f}" for k in STAT_KEYS) + "\n")
+    if not no_plots:
+        plots(dirpath, use, cam_fps, disp_hz)
+    print(f"# artifacts refreshed in {dirpath}/")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="gonzales latency statistics")
     ap.add_argument("-p", "--port", default=None)
@@ -355,7 +400,19 @@ def main():
     p_set.add_argument("key")
     p_set.add_argument("value")
 
+    p_an = sub.add_parser("analyze",
+                          help="re-analyze a saved results dir "
+                               "(stats + annotated plots from samples.csv)")
+    p_an.add_argument("dir")
+    p_an.add_argument("--cam-fps", type=float, default=None)
+    p_an.add_argument("--disp-hz", type=float, default=None)
+    p_an.add_argument("--no-plots", action="store_true")
+
     args = ap.parse_args()
+
+    if args.cmd == "analyze":
+        sys.exit(analyze_dir(args.dir, args.cam_fps, args.disp_hz,
+                             args.no_plots))
 
     g = Gonz(args.port, args.baud)
     try:

@@ -29,7 +29,7 @@ def main():
         # 2. help
         _, lines = g.cmd("help",
                          lambda s: "other input is discarded" in s, 3)
-        check("help", any("run <n>" in l for l in lines))
+        check("help", any("run [n]" in l for l in lines))
 
         # 3. get
         _, lines = g.cmd("get", lambda s: s.startswith("# dark="), 3)
@@ -55,7 +55,8 @@ def main():
             check("cal", c["span"] >= 100, f"span={c['span']}")
         except GonzError as e:
             check("cal (no sensor -> clean error)",
-                  "cal" in str(e) and "span" in str(e), str(e))
+                  "cal" in str(e) and ("no_rise" in str(e) or "span" in str(e)),
+                  str(e))
 
         # 7. mon
         buf = io.StringIO()
