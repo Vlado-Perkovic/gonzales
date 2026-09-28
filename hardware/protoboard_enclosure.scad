@@ -22,33 +22,32 @@ pcb_w          = 50;     // pcb width  (the 5 cm / front side)
 pcb_l          = 70;     // pcb length (the 7 cm side)
 pcb_t          = 1.6;    // pcb thickness (reference only)
 pcb_hole_d     = 2.0;    // corner mounting hole diameter
-pcb_hole_inset = 4.0;    // hole CENTRE distance from pcb edge -> MEASURE YOUR BOARD
-pcb_side_clear = 0.4;    // pcb-edge to inner-wall gap, per side
+pcb_hole_inset = 2.5;    // hole CENTRE distance from pcb edge -> MEASURE YOUR BOARD
+pcb_side_clear = 3;    // pcb-edge to inner-wall gap, per side
 
 /* ---------------- 2. Shell ---------------- */
-wall    = 2.0;           // wall thickness
-floor_t = 2.0;           // bottom thickness
-box_h   = 30;            // TOTAL outside height with lid closed
+wall    = 1.5;           // wall thickness
+floor_t = 1.5;           // bottom thickness
+box_h   = 25;            // TOTAL outside height with lid closed
 
 /* pcb snap posts */
 standoff_d = 5.6;        // base boss diameter (pcb rests on its top)
 standoff_h = 5.0;        // pcb underside height above the floor
-pin_d      = 2.1;        // snap pin diameter: pcb holes are 2.0, so this
-                         // press-fits. +0.05 = tighter, -0.05 = looser
-pin_above  = 0.7;        // how far the pin sticks out above the pcb top
+pin_d      = 1.8;        // [UPDATED] Made thinner (was 2.0) for easy sliding without breaking
+pin_above  = 1.5;        // how far the pin sticks out above the pcb top
 pin_lead   = 0.8;        // lead-in cone height on the pin tip
 
 /* ---------------- 3. Openings ---------------- */
 /* bottom opening */
-bh_w           = 10;     // size in x
+bh_w           = 15;     // size in x
 bh_l           = 10;     // size in y
-bh_cx          = 0;      // x centre offset (0 = centred across the width)
-bh_y_from_back = 10;     // hole CENTRE distance from the OUTER back edge
+bh_cx          = 7;      // x centre offset (0 = centred across the width)
+bh_y_from_back = 8.2;    // hole CENTRE distance from the OUTER back edge
                          // (back = the pcb_w side opposite the front opening)
 
 /* front opening (in the pcb_w / 5 cm side) */
-fh_w  = 12;              // opening width
-fh_h  = 8;               // opening height
+fh_w  = 15;              // opening width
+fh_h  = 20;               // opening height
 fh_x  = 8;               // opening left edge from OUTER left box edge
 fh_cz = 15;              // centre height of the opening
 
@@ -67,8 +66,9 @@ rib_p      = 0.3;        // box snap rib protrusion
 rib_h      = 1.6;        // box snap rib height
 entry_ch   = 1.2;        // lead-in chamfer at the box mouth
 pry_notch   = true;      // finger notches in the rim for prying the lid off
-pry_notch_d = 10;        // notch diameter
-
+pry_notch_d = 5;         // notch diameter
+foot_d      = 5;       // clamping foot diameter (added to press PCB down)
+foot_hole_d   = 2;     // diameter of the hole in the clamping foot
 /* ---------------- 5. What to show ---------------- */
 part    = "both";        // "box" | "lid" | "both" | "preview"
 cutaway = true;          // preview only: cut the box open to see inside
@@ -80,6 +80,7 @@ out_w = in_w + 2*wall;              // outside width
 out_l = in_l + 2*wall;              // outside length
 rim_z = box_h - lid_t;              // wall top plane (lid plate seats here)
 rib_z = rim_z - lip_h + bead_h;     // snap rib bottom plane
+foot_h = rim_z - (floor_t + standoff_h + pcb_t); // distance from lid ceiling to top of PCB
 
 /* ===================================================================== */
 
@@ -163,6 +164,7 @@ module lid() {
     bx0 = x0 + cc;  bx1 = out_w - x0 - cc;
     by0 = x0 + cc;  by1 = out_l - x0 - cc;
     zb  = lid_t + lip_h - bead_h;       // bead base height
+    
     union() {
         cube([out_w, out_l, lid_t]);    // plate, flush with box outside
         translate([x0, x0, lid_t])      // skirt
@@ -180,6 +182,28 @@ module lid() {
                                        snap_bead(bx1 - bx0);                    // back   (+Y)
         translate([bx0, x0,      zb])  mirror([0, 1, 0]) rotate([0, 0, 90])
                                        snap_bead(bx1 - bx0);                    // front  (-Y)
+                                       
+        /* clamping feet */
+        sxy = wall + pcb_side_clear + pcb_hole_inset;
+        
+        // Explicitly list the feet, omitting the one next to the front hole
+        foot_positions = [
+            // [sxy, sxy],               // Front-Left (REMOVED - next to front hole)
+            [out_w - sxy, sxy],          // Front-Right
+            [sxy, out_l - sxy],          // Back-Left
+            [out_w - sxy, out_l - sxy]   // Back-Right
+        ];
+        
+        for (pos = foot_positions) {
+            translate([pos[0], pos[1], lid_t])
+                difference() {
+                    // Main pillar
+                    cylinder(d = foot_d, h = foot_h);
+                    // Hollow tip
+                    translate([0, 0, foot_h - (pin_above + pin_lead + 0.5)])
+                        cylinder(d = foot_hole_d, h = pin_above + pin_lead + 1);
+                }
+        }
     }
 }
 
