@@ -14,7 +14,7 @@
 #include "cfg.h"
 #include "measure.h"
 
-#define GONZ_FW_VERSION "0.3.1"
+#define GONZ_FW_VERSION "0.3.2"
 
 #define RX_BUF_SZ 2048
 #define TX_BUF_SZ 2048
@@ -65,6 +65,7 @@ static void cmd_help(void)
     printf("#   mon [period_ms] [count]  stream R lines; count 0 = until stop\n");
     printf("#   stop                     abort run/mon\n");
     printf("#   set <key> <value>        set param (keys: see get; adc oneshot|continuous)\n");
+    printf("#   tune <latency_ms>         size interval/settle/timeout/jitter for a chain\n");
     printf("#   get                      list params + calibration\n");
     printf("#   reset                    restore default params\n");
     printf("# lines: '# ' info | M,... meas | C,... cal | R,... raw | E,... error\n");
@@ -96,6 +97,14 @@ static void dispatch(char *line)
         cfg_save(&g_cfg);
         measure_led_apply();
         printf("# defaults restored\n");
+    } else if (strcasecmp(argv[0], "tune") == 0) {
+        char *end = NULL;
+        long l = (argc > 1) ? strtol(argv[1], &end, 0) : 0;
+        if (end == argv[1] || *end != '\0' || l < 1 || l > 2000) {
+            printf("# usage: tune <expected latency ms 1..2000>\n");
+            return;
+        }
+        cfg_tune((uint32_t)l);
     } else if (strcasecmp(argv[0], "get") == 0 || strcasecmp(argv[0], "params") == 0) {
         cfg_print(&g_cfg);
     } else if (strcasecmp(argv[0], "set") == 0) {

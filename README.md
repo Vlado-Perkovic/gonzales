@@ -67,6 +67,7 @@ Command reference:
 | `mon [period_ms] [count]` | stream raw ADC readings; `count` 0 = until `stop`. Used for sensor alignment |
 | `stop` | abort `run`/`mon`; other input during a run is discarded |
 | `set <key> <value>` | set a parameter (table below), persisted in NVS |
+| `tune <latency_ms>` | size `interval`/`settle`/`timeout`/`jitter` from an expected chain latency (rough estimate is fine) |
 | `get` | show parameters and calibration |
 | `reset` | restore default parameters |
 
@@ -154,9 +155,18 @@ steps, µs-class work. Mode switches never deinit a running DMA driver;
 
 ## Parameters
 
-Timing parameters are sized against the chain's measured median latency L
-(get a rough L from a few `oneshot`s at a generous `interval`, e.g. 1000 ms).
-Defaults below were tuned on an ~80 ms phone chain.
+The timing parameters are all derived from the chain's latency L. For a new
+chain, run `tune <expected L in ms>` and calibrate — a rough estimate (half
+or double the true value) still lands every parameter in a working range:
+
+    # > tune 200
+    # tuned for L=200 ms: interval=600 settle=500 timeout=1000 jitter=100
+    # > cal
+
+`tune` applies: `timeout = 5L`, `settle = 2.5L`, `interval = 3L` (floors:
+500/200/220 ms), `jitter = L/2` (50–150 ms). To refine from a measurement,
+take a few `oneshot`s and re-`tune` with the observed median. Individual
+keys can still be set by hand:
 
 | key | default | sizing |
 |---|---|---|

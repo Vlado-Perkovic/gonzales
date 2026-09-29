@@ -38,3 +38,5 @@ esp_err_t cfg_save(const gonz_cfg_t *c);
 bool cfg_set_key(gonz_cfg_t *c, const char *key, const char *val,
                  char *err, size_t errlen);
 void cfg_print(const gonz_cfg_t *c);
+/* Size interval/settle/timeout/jitter from an expected chain latency. */
+void cfg_tune(uint32_t latency_ms);
