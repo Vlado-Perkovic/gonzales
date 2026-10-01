@@ -11,8 +11,10 @@ Measurements are reported over UART as CSV lines. A host tool collects them
 and computes statistics (raw and sensor-lag-corrected).
 
 Firmware: ESP-IDF v5.5, target `esp32` (ESP32-DevKitC, WROOM-32UE).
-Sensor front-end (CdS LDR divider or BPW34 photodiode) and wiring are
-documented in `hardware/`.
+Default pins: stimulus LED GPIO26, its loopback mirror GPIO27, digitized
+sensor output GPIO18, sensor input GPIO34 (ADC1_CH6). All output pins are
+configurable over the shell. Sensor front-end (CdS LDR divider or BPW34
+photodiode) and wiring are documented in `hardware/`.
 
 ## Build and flash
 
@@ -180,12 +182,33 @@ keys can still be set by hand:
 | `th10 th25 th50 th90` | 1000/2500/5000/7000 | crossing fractions ×10000; keep the 10/25/50 geometry — the onset correction constant is derived for it |
 | `adc` / `adcrate` | oneshot / 500000 | backend selection and its rate |
 | `med` | 1 | median-of-3 ADC reads (oneshot mode) |
-| `led` / `mirror` | 26 / 27 | stimulus GPIO / loopback mirror (-1 disables) |
+| `led` / `mirror` / `cross` | 26 / 27 / 18 | stimulus GPIO / loopback mirror / digitized sensor output (-1 disables any) |
 
 Symptoms: `d?` flags → raise `settle` or `interval`; `E,to` → weak signal
 or `timeout` too small; `p90` on most samples → source brightness ramps
 (lock camera AE) or lower `th90`; spacing stuck at `timeout`+off-edge →
 `th90` unreachable.
+
+## Digitized sensor output (`cross`)
+
+GPIO `cross` (default 18) carries the analog signal as a digital level:
+high while the sensor holds above the th25 crossing level, low again once
+it falls below that level minus hysteresis (5% of span, min 10 counts —
+Schmitt behavior, no chatter at the crossing).
+
+In **continuous mode** it is driven from the ADC DMA frame-done interrupt
+on every frame: always live regardless of shell activity, with a worst-case
+edge latency of one frame (64 bytes = 32 samples → 64 µs at 500 kHz
+adcrate, 16 µs at 2 MHz) plus ISR latency. Together with the `mirror` pin
+this gives a scope or logic analyzer both sides of the measurement as
+clean digital edges: mirror = stimulus, cross = response. The threshold
+follows calibration (dark/span/th25) automatically; before the first
+`cal` it toggles at dark+50 counts.
+
+In **oneshot mode** there is no interrupt source; `cross` only updates
+while a command (`mon`/`cal`/`run`) is actively reading the ADC — use
+continuous mode when the pin must track in real time. `set cross 2` puts
+it on the DevKitC's onboard LED as a visible threshold indicator.
 
 ## Methodology
 

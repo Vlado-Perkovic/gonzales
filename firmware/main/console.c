@@ -14,7 +14,7 @@
 #include "cfg.h"
 #include "measure.h"
 
-#define GONZ_FW_VERSION "0.3.2"
+#define GONZ_FW_VERSION "0.3.4"
 
 #define RX_BUF_SZ 2048
 #define TX_BUF_SZ 2048
@@ -114,7 +114,8 @@ static void dispatch(char *line)
         }
         char err[80];
         if (cfg_set_key(&g_cfg, argv[1], argv[2], err, sizeof err)) {
-            if (strcasecmp(argv[1], "led") == 0 || strcasecmp(argv[1], "mirror") == 0)
+            if (strcasecmp(argv[1], "led") == 0 || strcasecmp(argv[1], "mirror") == 0 ||
+                strcasecmp(argv[1], "cross") == 0)
                 measure_led_apply();
             if (strcasecmp(argv[1], "adc") == 0 || strcasecmp(argv[1], "adcrate") == 0)
                 measure_adc_apply(true);

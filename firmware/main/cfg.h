@@ -24,6 +24,7 @@ typedef struct {
     uint32_t th90;
     int32_t  led_gpio;       /* stimulus LED gpio                           */
     int32_t  mirror_gpio;    /* mirrors LED level for loopback tests, -1=off*/
+    int32_t  cross_gpio;     /* digitized sensor output (th25 Schmitt), -1=off*/
     uint32_t dark;           /* calibration: dark ADC level                 */
     uint32_t span;           /* calibration: bright-dark span               */
 } gonz_cfg_t;

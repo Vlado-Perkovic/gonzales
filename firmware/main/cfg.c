@@ -29,6 +29,7 @@ static const gonz_cfg_t c_defaults = {
     .th10 = 1000, .th25 = 2500, .th50 = 5000, .th90 = 7000,
     .led_gpio     = 26,
     .mirror_gpio  = 27,
+    .cross_gpio   = 18,
     .dark         = 0,
     .span         = 0,
 };
@@ -79,6 +80,7 @@ esp_err_t cfg_load(gonz_cfg_t *c)
     rd_u32(h, "th90",      &c->th90);
     rd_u32(h, "led",       (uint32_t *)&c->led_gpio);
     rd_u32(h, "mirror",    (uint32_t *)&c->mirror_gpio);
+    rd_u32(h, "cross",     (uint32_t *)&c->cross_gpio);
     rd_u32(h, "dark",      &c->dark);
     rd_u32(h, "span",      &c->span);
     nvs_close(h);
@@ -108,6 +110,7 @@ esp_err_t cfg_save(const gonz_cfg_t *c)
     nvs_set_u32(h, "th90",      c->th90);
     nvs_set_u32(h, "led",       (uint32_t)c->led_gpio);
     nvs_set_u32(h, "mirror",    (uint32_t)c->mirror_gpio);
+    nvs_set_u32(h, "cross",     (uint32_t)c->cross_gpio);
     nvs_set_u32(h, "dark",      c->dark);
     nvs_set_u32(h, "span",      c->span);
     e = nvs_commit(h);
@@ -184,6 +187,19 @@ static bool parse_set(gonz_cfg_t *c, const char *key, const char *val,
         c->mirror_gpio = (int32_t)v;
         return true;
     }
+    if (strcasecmp(key, "cross") == 0) {
+        if (v < -1 || v > 33) {
+            snprintf(err, errlen, "cross gpio %ld outside -1..33", v);
+            return false;
+        }
+        if (v >= 0 && ((int32_t)v == c->led_gpio ||
+                       (int32_t)v == c->mirror_gpio)) {
+            snprintf(err, errlen, "cross gpio %ld overlaps led/mirror", v);
+            return false;
+        }
+        c->cross_gpio = (int32_t)v;
+        return true;
+    }
     snprintf(err, errlen, "unknown key '%s' (see get)", key);
     return false;
 }
@@ -223,9 +239,10 @@ void cfg_print(const gonz_cfg_t *c)
            c->jitter_ms, c->calbright_ms, c->margin, c->mon_period_ms);
     printf("# med=%" PRIu8 " dbg=%" PRIu8 " adc=%s adcrate=%" PRIu32
            " th10=%" PRIu32 " th25=%" PRIu32
-           " th50=%" PRIu32 " th90=%" PRIu32 " led=%" PRId32 " mirror=%" PRId32 "\n",
+           " th50=%" PRIu32 " th90=%" PRIu32 " led=%" PRId32 " mirror=%" PRId32
+           " cross=%" PRId32 "\n",
            c->med, c->dbg, c->adc_mode ? "continuous" : "oneshot", c->adcrate,
            c->th10, c->th25, c->th50, c->th90, c->led_gpio,
-           c->mirror_gpio);
+           c->mirror_gpio, c->cross_gpio);
     printf("# dark=%" PRIu32 " span=%" PRIu32 "\n", c->dark, c->span);
 }

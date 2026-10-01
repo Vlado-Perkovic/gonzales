@@ -15,6 +15,7 @@
 #include "esp_random.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_continuous.h"
+#include "soc/gpio_struct.h"
 #include "cfg.h"
 #include "console.h"
 
@@ -22,7 +23,9 @@
 #define CAL_MIN_SPAN  100               /* counts; below = no usable signal */
 #define BURST_N       15
 #define MAX_RUN_N     10000
-#define FRAME_BYTES   256               /* DMA frame buffer, 128 samples    */
+#define FRAME_BYTES   64                /* DMA frame: 32 samples -> cross
+                                           output granularity = 64 bytes /
+                                           (2 * adcrate) = 64 us @ 500 kHz */
 
 static adc_oneshot_unit_handle_t s_adc;        /* oneshot backend  */
 static adc_continuous_handle_t s_adc_c;        /* continuous backend */
@@ -54,10 +57,79 @@ static inline int decode_sample(const uint8_t *p)
     return ((uint16_t)p[0] | ((uint16_t)p[1] << 8)) & 0x0FFF;
 }
 
+/* Digitized sensor output: high while the signal holds above the th25
+ * level, low again below it minus hysteresis (Schmitt, no chatter).
+ * In continuous mode it is driven from the DMA frame-done ISR on every
+ * frame (always live, granularity = one frame); in oneshot mode it only
+ * updates while a command reads the ADC. */
+static int s_cross_state;
+
+static void cross_levels(uint32_t *thr, uint32_t *hyst)
+{
+    if (g_cfg.span >= CAL_MIN_SPAN) {
+        *thr  = g_cfg.dark +
+                (uint32_t)((uint64_t)g_cfg.th25 * g_cfg.span / 10000);
+        *hyst = g_cfg.span / 20;
+        if (*hyst < 10) *hyst = 10;
+    } else {
+        *thr = g_cfg.dark + 50;    /* pre-cal fallback: absolute rise level */
+        *hyst = 10;
+    }
+}
+
+static void cross_update(int v)
+{
+    if (g_cfg.cross_gpio < 0 || v < 0) return;
+    uint32_t thr, hyst;
+    cross_levels(&thr, &hyst);
+    bool want = s_cross_state
+        ? (v >= (int)(thr - hyst))    /* high: hold until below thr - hyst */
+        : (v >= (int)thr);
+    if (want != (bool)s_cross_state) {
+        s_cross_state = want;
+        gpio_set_level(g_cfg.cross_gpio, want);
+    }
+}
+
+/* ISR path: direct register writes only (no flash-resident calls, safe
+ * while NVS flash operations disable the cache). */
+static inline void IRAM_ATTR cross_write_fast(int pin, int lvl)
+{
+    if (pin < 32) {
+        if (lvl) GPIO.out_w1ts = 1U << pin;
+        else     GPIO.out_w1tc = 1U << pin;
+    } else {
+        if (lvl) GPIO.out1_w1ts.val = 1U << (pin - 32);
+        else     GPIO.out1_w1tc.val = 1U << (pin - 32);
+    }
+}
+
+static bool IRAM_ATTR on_frame_done(adc_continuous_handle_t handle,
+                                    const adc_continuous_evt_data_t *ed,
+                                    void *user)
+{
+    if (g_cfg.cross_gpio < 0) return false;
+    uint32_t thr, hyst;
+    cross_levels(&thr, &hyst);
+    int ns = ed->size / SOC_ADC_DIGI_RESULT_BYTES;
+    for (int i = 0; i < ns; i++) {
+        int v = decode_sample(&ed->conv_frame_buffer[i * SOC_ADC_DIGI_RESULT_BYTES]);
+        bool want = s_cross_state
+            ? (v >= (int)(thr - hyst))
+            : (v >= (int)thr);
+        if (want != (bool)s_cross_state) {
+            s_cross_state = want;
+            cross_write_fast(g_cfg.cross_gpio, want);
+        }
+    }
+    return false;
+}
+
 static int read_once(void)
 {
     int v = -1;
     if (adc_oneshot_read(s_adc, ADC_CHANNEL, &v) != ESP_OK) return -1;
+    cross_update(v);
     return v;
 }
 
@@ -66,7 +138,9 @@ static void drain_cont(void)
     uint32_t got = 0;
     while (adc_continuous_read(s_adc_c, s_buf, sizeof s_buf, &got, 0) == ESP_OK
            && got >= SOC_ADC_DIGI_RESULT_BYTES) {
-        s_last_val = decode_sample(&s_buf[got - SOC_ADC_DIGI_RESULT_BYTES]);
+        int ns = got / SOC_ADC_DIGI_RESULT_BYTES;
+        s_last_val = decode_sample(
+            &s_buf[(ns - 1) * SOC_ADC_DIGI_RESULT_BYTES]);
     }
 }
 
@@ -152,13 +226,17 @@ void measure_adc_apply(bool announce)
             .max_store_buf_size = 8192,
             .conv_frame_size = FRAME_BYTES,
         };
-        if (adc_continuous_new_handle(&hc, &s_adc_c) == ESP_OK &&
-            cont_reconfig()) {
-            if (announce)
-                printf("# adc: continuous @ %" PRIu32 " Hz\n", g_cfg.adcrate);
-            return;
-        }
-        if (s_adc_c) {
+        if (adc_continuous_new_handle(&hc, &s_adc_c) == ESP_OK) {
+            adc_continuous_evt_cbs_t cbs = {
+                .on_conv_done = on_frame_done,
+            };
+            adc_continuous_register_event_callbacks(s_adc_c, &cbs, NULL);
+            if (cont_reconfig()) {
+                if (announce)
+                    printf("# adc: continuous @ %" PRIu32 " Hz\n",
+                           g_cfg.adcrate);
+                return;
+            }
             adc_continuous_deinit(s_adc_c);
             s_adc_c = NULL;
         }
@@ -191,6 +269,13 @@ void measure_led_apply(void)
         gpio_reset_pin(g_cfg.mirror_gpio);
         gpio_set_direction(g_cfg.mirror_gpio, GPIO_MODE_OUTPUT);
     }
+    if (g_cfg.cross_gpio >= 0 && g_cfg.cross_gpio != g_cfg.led_gpio &&
+        g_cfg.cross_gpio != g_cfg.mirror_gpio) {
+        gpio_reset_pin(g_cfg.cross_gpio);
+        gpio_set_direction(g_cfg.cross_gpio, GPIO_MODE_OUTPUT);
+        gpio_set_level(g_cfg.cross_gpio, 0);
+    }
+    s_cross_state = 0;
     led_off();
 }
 
