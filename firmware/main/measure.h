@@ -11,6 +11,8 @@ void measure_adc_apply(bool announce);       /* (re)configure ADC backend     */
 void measure_led_apply(void);                /* (re)init LED gpio             */
 
 void measure_cal(bool automatic);             /* learn dark/bright -> C or E line */
+void measure_tune(uint32_t latency_ms);       /* cal passes + parameter search;
+                                                 0 = discover latency */
 void measure_oneshot(void);                   /* one pulse -> M or E line */
 void measure_run(uint32_t n, bool has_iv, uint32_t iv); /* n pulses + summary */
 void measure_mon(uint32_t period_ms, uint32_t count);   /* R stream */

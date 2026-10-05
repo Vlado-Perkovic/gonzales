@@ -212,24 +212,6 @@ bool cfg_set_key(gonz_cfg_t *c, const char *key, const char *val,
     return true;
 }
 
-static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi)
-{
-    return v < lo ? lo : (v > hi ? hi : v);
-}
-
-void cfg_tune(uint32_t latency_ms)
-{
-    g_cfg.timeout_ms  = clamp_u32(5 * latency_ms, 500, 10000);
-    g_cfg.settle_ms   = clamp_u32(5 * latency_ms / 2, 200, 5000);
-    g_cfg.interval_ms = clamp_u32(3 * latency_ms, 220, 5000);
-    g_cfg.jitter_ms   = clamp_u32(latency_ms / 2, 50, 150);
-    cfg_save(&g_cfg);
-    printf("# tuned for L=%" PRIu32 " ms: interval=%" PRIu32 " settle=%" PRIu32
-           " timeout=%" PRIu32 " jitter=%" PRIu32 "\n",
-           latency_ms, g_cfg.interval_ms, g_cfg.settle_ms,
-           g_cfg.timeout_ms, g_cfg.jitter_ms);
-}
-
 void cfg_print(const gonz_cfg_t *c)
 {
     printf("# interval=%" PRIu32 " settle=%" PRIu32 " timeout=%" PRIu32

@@ -397,9 +397,10 @@ def main():
     p_mon.add_argument("--count", type=int, default=0)
 
     p_tu = sub.add_parser("tune",
-                          help="size timing parameters for an expected "
-                               "chain latency in ms")
-    p_tu.add_argument("latency_ms", type=int)
+                          help="calibrate + auto-size timing parameters; "
+                               "optional expected latency in ms, omit for "
+                               "full auto-discovery")
+    p_tu.add_argument("latency_ms", type=int, nargs="?", default=0)
 
     p_set = sub.add_parser("set")
     p_set.add_argument("key")
@@ -435,10 +436,12 @@ def main():
             for l in g.params():
                 print(l)
         elif args.cmd == "tune":
-            _, lines = g.cmd(f"tune {args.latency_ms}",
-                             lambda s: s.startswith("# tuned") or s.startswith("# usage"), 3)
+            cmd = f"tune {args.latency_ms}".strip()
+            _, lines = g.cmd(cmd, lambda s: s.startswith("# tune done")
+                             or s.startswith("# tune aborted")
+                             or s.startswith("# usage"), 300)
             for l in lines:
-                if not l.startswith("# >"):
+                if not l.startswith("# >") and not l.startswith("M,"):
                     print(l)
         elif args.cmd == "set":
             g.set(args.key, args.value)

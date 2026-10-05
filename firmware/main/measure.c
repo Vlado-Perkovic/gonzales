@@ -314,40 +314,51 @@ static int64_t jitter_us(void)
 
 /* ---- calibration ------------------------------------------------------- */
 
+/* One dark/rise/bright measurement. Returns false on abort or when the
+ * light never rose within timeout (caller disambiguates via the sticky
+ * stop flag). */
+static bool cal_measure(uint32_t *dark, uint32_t *bright)
+{
+    led_off();
+    vTaskDelay(pdMS_TO_TICKS(g_cfg.settle_ms));
+    *dark = burst_median(BURST_N, 2);
+
+    /* Blob must travel camera->display before the bright level exists:
+     * wait for a real rise (up to timeout), then stabilize calbright.
+     * Flat 50-count rise test: stale cal data must not block recal. */
+    int rise_thr = (int)*dark + 50;
+    led_on();
+    int64_t deadline = esp_timer_get_time() +
+                       (int64_t)g_cfg.timeout_ms * 1000LL;
+    bool rose = false;
+    while (esp_timer_get_time() < deadline) {
+        if (read_raw() >= rise_thr) { rose = true; break; }
+        if (console_poll_stop()) { led_off(); return false; }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    if (rose && delay_abortable(g_cfg.calbright_ms)) {
+        led_off();
+        return false;
+    }
+    *bright = burst_median(BURST_N, 2);
+    led_off();
+    return rose;
+}
+
 void measure_cal(bool automatic)
 {
     if (!automatic) printf("# cal: learning dark/bright (chain-aware, up to "
                            "%" PRIu32 "+%" PRIu32 " ms)\n",
                            g_cfg.timeout_ms, g_cfg.settle_ms);
-    led_off();
-    vTaskDelay(pdMS_TO_TICKS(g_cfg.settle_ms));
-    uint32_t dark = burst_median(BURST_N, 2);
-
-    /* Blob must travel camera->display before the bright level exists:
-     * wait for a real rise (up to timeout), then stabilize calbright.
-     * Flat 50-count rise test: stale cal data must not block recal. */
-    int rise_thr = (int)dark + 50;
-    led_on();
-    int64_t deadline = esp_timer_get_time() +
-                       (int64_t)g_cfg.timeout_ms * 1000LL;
-    bool rose = false, aborted = false;
-    while (esp_timer_get_time() < deadline) {
-        if (read_raw() >= rise_thr) { rose = true; break; }
-        if (console_poll_stop()) { aborted = true; break; }
-        vTaskDelay(pdMS_TO_TICKS(2));
-    }
-    if (rose && delay_abortable(g_cfg.calbright_ms)) aborted = true;
-    uint32_t bright = burst_median(BURST_N, 2);
-    led_off();
-
-    if (aborted) {
-        printf("E,%" PRIu32 ",cal,aborted\n", ++s_seq);
-        return;
-    }
-    if (!rose) {
-        printf("E,%" PRIu32 ",cal,no_rise - light never arrived within "
-               "timeout=%" PRIu32 " ms; check the chain/alignment\n",
-               ++s_seq, g_cfg.timeout_ms);
+    uint32_t dark, bright;
+    if (!cal_measure(&dark, &bright)) {
+        if (console_poll_stop()) {
+            printf("E,%" PRIu32 ",cal,aborted\n", ++s_seq);
+        } else {
+            printf("E,%" PRIu32 ",cal,no_rise - light never arrived within "
+                   "timeout=%" PRIu32 " ms; check the chain/alignment\n",
+                   ++s_seq, g_cfg.timeout_ms);
+        }
         return;
     }
 
@@ -370,6 +381,7 @@ typedef struct {
     bool emitted;      /* M or E line printed        */
     bool usable;       /* t50 captured -> stats ok   */
     bool aborted;
+    bool dark_settled; /* dark level reached before the pulse */
     int64_t t0;        /* absolute us of LED on      */
     int64_t lat50;     /* us, 0 if not crossed       */
 } pulse_out_t;
@@ -505,8 +517,211 @@ static void do_pulse(pulse_out_t *out)
 
     out->emitted = true;
     out->usable = tx[2] != 0;
+    out->dark_settled = dark_ok;
     out->t0 = t0;
     out->lat50 = tx[2] ? tx[2] - t0 : 0;
+}
+
+/* ---- auto-tune ---------------------------------------------------------- */
+
+static void sort_i64(int64_t *a, int n)
+{
+    for (int i = 1; i < n; i++) {
+        int64_t k = a[i];
+        int j = i;
+        while (j > 0 && a[j - 1] > k) { a[j] = a[j - 1]; j--; }
+        a[j] = k;
+    }
+}
+
+static void sort_u32(uint32_t *a, int n)
+{
+    for (int i = 1; i < n; i++) {
+        uint32_t k = a[i];
+        int j = i;
+        while (j > 0 && a[j - 1] > k) { a[j] = a[j - 1]; j--; }
+        a[j] = k;
+    }
+}
+
+/* Fire n pulses at current params. Discovery (strict=false): majority of
+ * pulses must yield usable lat50. Tier validation (strict=true): >= n-1
+ * usable AND dark settled on all but one pulse.
+ * Returns the median latency in ms via med_ms. */
+static bool probe_batch(uint32_t n, bool strict, uint32_t *med_ms)
+{
+    int64_t lat[16];
+    uint32_t ok = 0, bad_dark = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (i) {
+            if (delay_abortable(g_cfg.interval_ms)) return false;
+            if (console_poll_stop()) return false;
+        }
+        pulse_out_t r;
+        do_pulse(&r);
+        if (r.aborted) return false;
+        if (!r.dark_settled) bad_dark++;
+        if (r.usable && ok < 16) lat[ok++] = r.lat50;
+    }
+    bool enough = strict
+        ? (ok >= n - 1 && bad_dark <= 1)
+        : (ok >= (n + 1) / 2 && ok > 0);
+    if (!enough) return false;
+    sort_i64(lat, ok);
+    *med_ms = (uint32_t)(lat[ok / 2] / 1000);
+    return true;
+}
+
+typedef struct {
+    const char *name;
+    uint32_t settle_x10, timeout_x10, interval_x10;
+} tune_tier_t;
+
+void measure_tune(uint32_t latency_ms)
+{
+    /* tune = multi-pass calibration + measured-latency parameter search.
+     * latency_ms == 0: discover the chain latency by probing, then run
+     * the tier search. Non-zero: trust the given latency, conservative
+     * formulas, one validation probe.
+     * Tiers run conservative -> fast; every tier must pass the same
+     * validation bar (>=7/8 pulses usable and dark-settled, median stable),
+     * so on ties the fastest tier wins. */
+    static const tune_tier_t tiers[] = {
+        { "conservative", 25, 50, 30 },
+        { "balanced",     16, 30, 22 },
+        { "fast",         13, 20, 17 },
+    };
+
+    struct { uint32_t interval, settle, timeout, jitter; } backup = {
+        g_cfg.interval_ms, g_cfg.settle_ms, g_cfg.timeout_ms, g_cfg.jitter_ms,
+    };
+    bool restore_on_fail = true;
+
+    /* safe probing params: generous for any chain up to ~1.5 s */
+    g_cfg.interval_ms = 1200;
+    g_cfg.settle_ms = 800;
+    g_cfg.timeout_ms = 2000;
+    g_cfg.jitter_ms = 100;
+
+    printf("# tune: calibrating (3 passes)\n");
+    uint32_t spans[3], darks[3], brights[3];
+    for (int i = 0; i < 3; i++) {
+        if (!cal_measure(&darks[i], &brights[i])) {
+            printf("E,%" PRIu32 ",tune,cal_aborted_or_no_rise\n", ++s_seq);
+            goto out;
+        }
+        spans[i] = brights[i] > darks[i] ? brights[i] - darks[i] : 0;
+        printf("# tune: cal pass %d: dark=%" PRIu32 " span=%" PRIu32 "\n",
+               i + 1, darks[i], spans[i]);
+        if (console_poll_stop()) goto out;
+    }
+    if (spans[0] < CAL_MIN_SPAN || spans[1] < CAL_MIN_SPAN ||
+        spans[2] < CAL_MIN_SPAN) {
+        printf("E,%" PRIu32 ",tune,span_too_small - check signal\n", ++s_seq);
+        goto out;
+    }
+    /* median of 3 */
+    sort_u32(spans, 3);
+    sort_u32(darks, 3);
+    sort_u32(brights, 3);
+    if (spans[2] > 2 * spans[0])
+        printf("# tune: warning: span unstable across passes\n");
+    g_cfg.dark = darks[1];
+    g_cfg.span = spans[1];
+    printf("C,%" PRIu32 ",%" PRIu32 ",%" PRIu32 "\n",
+           g_cfg.dark, brights[1], g_cfg.span);
+
+    /* phase 2: discover latency, escalating the window if pulses time out */
+    uint32_t L = latency_ms;
+    bool locked = latency_ms != 0;
+    if (!locked) {
+        for (int attempt = 0; attempt < 3 && !locked; attempt++) {
+            printf("# tune: probing latency (interval=%" PRIu32 " settle=%" PRIu32
+                   " timeout=%" PRIu32 ")\n",
+                   g_cfg.interval_ms, g_cfg.settle_ms, g_cfg.timeout_ms);
+            locked = probe_batch(5, false, &L);
+            if (locked) break;
+            if (console_poll_stop()) goto out;
+            g_cfg.timeout_ms = g_cfg.timeout_ms * 2 > 10000 ?
+                10000 : g_cfg.timeout_ms * 2;
+            g_cfg.settle_ms = g_cfg.settle_ms * 2 > 6000 ?
+                6000 : g_cfg.settle_ms * 2;
+            g_cfg.interval_ms = g_cfg.interval_ms * 3 / 2;
+        }
+        if (!locked) {
+            printf("E,%" PRIu32 ",tune,no_lock - chain never responded\n",
+                   ++s_seq);
+            goto out;
+        }
+    }
+    printf("# tune: chain latency ~%" PRIu32 " ms\n", L);
+
+    /* phase 3: tier search, fastest passing tier wins */
+    int tier_max = latency_ms ? 1 : 3;
+    for (int t = 0; t < tier_max; t++) {
+        const tune_tier_t *tier = &tiers[t];
+        uint32_t settle = tier->settle_x10 * L / 10;
+        uint32_t timeout = tier->timeout_x10 * L / 10 + 100;
+        uint32_t interval = tier->interval_x10 * L / 10;
+        uint32_t floor_s = L * 11 / 10 + 20;
+        if (settle < floor_s) settle = floor_s;
+        if (settle < 150) settle = 150;
+        if (timeout < 500) timeout = 500;
+        if (interval < 220) interval = 220;
+        uint32_t jitter = L / 2;
+        if (jitter < 50) jitter = 50;
+        if (jitter > 150) jitter = 150;
+
+        g_cfg.settle_ms = settle;
+        g_cfg.timeout_ms = timeout;
+        g_cfg.interval_ms = interval;
+        g_cfg.jitter_ms = jitter;
+
+        printf("# tune: tier %-13s interval=%" PRIu32 " settle=%" PRIu32
+               " timeout=%" PRIu32 " jitter=%" PRIu32 ": probing 8\n",
+               tier->name, interval, settle, timeout, jitter);
+        uint32_t m = 0;
+        bool pass = probe_batch(8, true, &m);
+        uint32_t shift = m > L ? m - L : L - m;
+        if (pass && shift <= (L / 4 > 30 ? L / 4 : 30)) {
+            printf("# tune: tier %s passed (median %" PRIu32 " ms)\n",
+                   tier->name, m);
+            L = m;
+            restore_on_fail = false;
+        } else {
+            printf("# tune: tier %s rejected%s\n", tier->name,
+                   pass ? " (median shifted)" : "");
+            break;
+        }
+        if (console_poll_stop()) goto out;
+    }
+
+    if (restore_on_fail) {
+        /* even the conservative tier failed against the measured L:
+         * fall back to the conservative formulas */
+        g_cfg.settle_ms = 25 * L / 10;
+        g_cfg.timeout_ms = 50 * L / 10 + 100;
+        g_cfg.interval_ms = 30 * L / 10;
+        if (g_cfg.settle_ms < 150) g_cfg.settle_ms = 150;
+        if (g_cfg.timeout_ms < 500) g_cfg.timeout_ms = 500;
+        if (g_cfg.interval_ms < 220) g_cfg.interval_ms = 220;
+        printf("# tune: no tier validated; conservative fallback applied\n");
+    }
+    cfg_save(&g_cfg);
+    printf("# tune done: L=%" PRIu32 " ms interval=%" PRIu32 " settle=%" PRIu32
+           " timeout=%" PRIu32 " jitter=%" PRIu32 " dark=%" PRIu32
+           " span=%" PRIu32 "\n",
+           L, g_cfg.interval_ms, g_cfg.settle_ms, g_cfg.timeout_ms,
+           g_cfg.jitter_ms, g_cfg.dark, g_cfg.span);
+    return;
+
+out:
+    g_cfg.interval_ms = backup.interval;
+    g_cfg.settle_ms = backup.settle;
+    g_cfg.timeout_ms = backup.timeout;
+    g_cfg.jitter_ms = backup.jitter;
+    cfg_save(&g_cfg);
+    printf("# tune aborted, previous timing parameters restored\n");
 }
 
 /* ---- commands ---------------------------------------------------------- */

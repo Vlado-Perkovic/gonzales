@@ -157,18 +157,33 @@ steps, µs-class work. Mode switches never deinit a running DMA driver;
 
 ## Parameters
 
-The timing parameters are all derived from the chain's latency L. For a new
-chain, run `tune <expected L in ms>` and calibrate — a rough estimate (half
-or double the true value) still lands every parameter in a working range:
+For a new chain, `tune` does the whole setup — calibration and parameter
+sizing — in one command (takes ~20–60 s):
 
-    # > tune 200
-    # tuned for L=200 ms: interval=600 settle=500 timeout=1000 jitter=100
-    # > cal
+    # > tune
+    # tune: calibrating (3 passes)
+    # tune: cal pass 1: dark=0 span=269
+    ...
+    C,0,269,269
+    # tune: probing latency (interval=1200 settle=800 timeout=2000)
+    # tune: chain latency ~182 ms
+    # tune: tier conservative  interval=546 ...: probing 8
+    # tune: tier conservative passed (median 181 ms)
+    # tune: tier balanced       interval=400 ...: probing 8
+    # tune: tier balanced passed (median 182 ms)
+    # tune: tier fast           interval=309 ...: probing 8
+    # tune: tier fast rejected
+    # tune done: L=182 ms interval=400 settle=291 timeout=646 jitter=91 dark=0 span=269
 
-`tune` applies: `timeout = 5L`, `settle = 2.5L`, `interval = 3L` (floors:
-500/200/220 ms), `jitter = L/2` (50–150 ms). To refine from a measurement,
-take a few `oneshot`s and re-`tune` with the observed median. Individual
-keys can still be set by hand:
+How the search works: latency is discovered with deliberately generous
+parameters (escalating the window if pulses time out), then three tiers —
+conservative, balanced, fast — are applied and each validated by measuring
+8 pulses. A tier passes only if ≥7/8 pulses are usable with the dark level
+settled and the measured median stays stable; the fastest passing tier is
+adopted (equal performance favors speed by construction). If no tier
+validates, conservative formulas are kept. `stop` aborts safely and
+restores the previous parameters. `tune <ms>` trusts a known latency and
+skips discovery. Individual keys can still be set by hand:
 
 | key | default | sizing |
 |---|---|---|
